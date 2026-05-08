@@ -127,11 +127,3 @@ The user-facing artifact is `<run>/briefing.md`; `<run>/briefing.json` is the st
 ```bash
 pip install "arxiv>=2.0" "rank_bm25>=0.2" "networkx>=3.0"
 ```
-
-## References
-
-- `.claude/skills/<name>/SKILL.md` — authoritative per-skill I/O contract, error-handling table, and independent test hooks.
-- `CLAUDE.md` — repo-level guidance for Claude Code: project conventions, canonical per-paper schema, gotchas.
-- `README.md` — public-facing project overview, directory structure, quick-start.
-- `FinalProjectGuidance.pdf` — assignment rubric (skill independence, quantifiable evaluation requirements).
-- StudyClawHub registry: <https://trust-app-ai-lab.github.io/StudyClawHub/>.
