@@ -296,7 +296,7 @@ This convention is what lets the agent be zero-config: one `paper-search` call s
 
 ---
 
-## Authorship and contributions
+## Contributions
 
 | Skills | Author |
 |---|---|
