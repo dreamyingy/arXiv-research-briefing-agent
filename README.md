@@ -24,7 +24,7 @@ A six-skill agent that, given a natural-language research query (English or Chin
     - [5. `paper-report` — daily briefing](#5-paper-report--daily-briefing)
     - [6. `follow-up` — grounded Q\&A over the cached run](#6-follow-up--grounded-qa-over-the-cached-run)
     - [Default I/O behavior every skill MUST implement](#default-io-behavior-every-skill-must-implement)
-  - [Authorship and contributions](#authorship-and-contributions)
+  - [Contributions](#contributions)
 
 ---
 
