@@ -123,16 +123,8 @@ arXiv-research-briefing-agent/
 │       │   ├── SKILL.md
 │       │   └── report.py
 │       ├── follow-up/                 # Skill 6 — grounded Q&A
-│       │   ├── SKILL.md
-│       │   └── followup.py
-│       │
-│       ├── sch-create/                # vendor: StudyClawHub toolkit
-│       ├── sch-deps/                  # vendor: dependency manager
-│       ├── sch-install/               # vendor: install from registry
-│       ├── sch-search/                # vendor: search registry
-│       ├── sch-submit/                # vendor: publish to registry
-│       ├── sch-delete/                # vendor: unregister
-│       └── latex-report/              # vendor: NeurIPS LaTeX scaffolding
+│           ├── SKILL.md
+│           └── followup.py
 │
 └── output/
     ├── latest_run.txt                 # run_id of the most recent search
