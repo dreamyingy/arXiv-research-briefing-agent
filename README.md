@@ -103,8 +103,7 @@ A single `paper-search` call is the only thing that creates a run dir and update
 ```
 arXiv-research-briefing-agent/
 ├── README.md                          # this file
-├── CLAUDE.md                          # repo guidance for Claude Code
-├── FinalProjectGuidance.pdf           # course rubric
+├── AGENTS.md                          # AGENTS.md
 │
 ├── .claude/
 │   └── skills/
