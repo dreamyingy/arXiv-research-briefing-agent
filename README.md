@@ -123,7 +123,7 @@ arXiv-research-briefing-agent/
 │       ├── paper-report/              # Skill 5 — daily briefing
 │       │   ├── SKILL.md
 │       │   └── report.py
-│       ├── follow-up/                 # Skill 6 — grounded Q&A
+│       └── follow-up/                 # Skill 6 — grounded Q&A
 │           ├── SKILL.md
 │           └── followup.py
 │       
