@@ -23,7 +23,7 @@ skills:
 
 A six-skill agent that turns a natural-language research query into a daily arXiv briefing plus grounded follow-up Q&A. Skills communicate only through JSON files in a per-run directory `output/<run_id>/`, so any single skill can be re-run, swapped, or evaluated in isolation.
 
-The deterministic post-search stages (`paper-extract`, `paper-network`, `paper-report`, `follow-up`) do **not** call an LLM — they are rule-based and stdlib-driven for reproducibility, which is also what makes the rubric's stability check tractable.
+The post-search Python scripts (`paper-extract`'s `extract.py`, `paper-network`, `paper-report`, `follow-up`) are deterministic, stdlib-only, and byte-stable across reruns — this is what makes the rubric's stability check tractable. `paper-extract` additionally performs an automatic agent-review pass at the orchestration layer (Claude Code itself) immediately after `extract.py`: the agent revises any extraction field that fails the verbatim-grounding contract documented in `paper-extract/SKILL.md`. The pre-review snapshot is preserved at `<run>/enriched_papers.rule_based.json`, so the deterministic baseline is always available alongside the reviewed output. No API key or network call is required from any script.
 
 ## Skills
 
@@ -31,7 +31,7 @@ The deterministic post-search stages (`paper-extract`, `paper-network`, `paper-r
 |---|---|---|---|
 | 1 | `paper-search` | `output/query.json` | `<run>/raw_papers.json` (+ updates `latest_run.txt`) |
 | 2 | `paper-rank` | `<run>/raw_papers.json` | `<run>/ranked_papers.json` |
-| 3 | `paper-extract` | `<run>/ranked_papers.json` | `<run>/enriched_papers.json` |
+| 3 | `paper-extract` | `<run>/ranked_papers.json` | `<run>/enriched_papers.json` (+ `<run>/enriched_papers.rule_based.json` pre-review snapshot) |
 | 4 | `paper-network` | `<run>/ranked_papers.json` (+ optional `enriched_papers.json`) | `<run>/graph.json`, `<run>/graph_metrics.json` |
 | 5 | `paper-report` | `<run>/{ranked,enriched,graph_metrics}.json` | `<run>/briefing.md`, `<run>/briefing.json` |
 | 6 | `follow-up` | `<run>/briefing.json` (+ all earlier JSON) | answer to stdout (+ optional `<run>/followups.jsonl`) |
@@ -58,7 +58,7 @@ ranked_papers.json + enriched_papers.json + graph_metrics.json ─→ paper-repo
 Two contracts make the pipeline composable:
 
 1. **JSON-file-only interface.** Skills never import each other's Python code. They communicate by reading and writing structured JSON in the run directory.
-2. **Run-id directory convention.** A run is a directory `output/<YYYY-MM-DD_HHMM_slug>/` created by `paper-search`. Every downstream skill writes back into the same directory, so a finished run accumulates the full chain `query.json → raw_papers.json → ranked_papers.json → enriched_papers.json → graph.json + graph_metrics.json → briefing.{md,json}`.
+2. **Run-id directory convention.** A run is a directory `output/<YYYY-MM-DD_HHMM_slug>/` created by `paper-search`. Every downstream skill writes back into the same directory, so a finished run accumulates the full chain `query.json → raw_papers.json → ranked_papers.json → enriched_papers.json (+ enriched_papers.rule_based.json pre-review snapshot) → graph.json + graph_metrics.json → briefing.{md,json}`.
 
 A single `paper-search` call is the only thing that creates a run dir and updates `output/latest_run.txt`. Every other skill auto-discovers the latest run via `latest_run.txt`, or accepts `--input-dir <path>` to pin a specific run.
 
@@ -95,6 +95,9 @@ Each skill auto-discovers the latest run via `output/latest_run.txt`.
 python .claude/skills/paper-search/search.py --query-file ./output/query.json
 python .claude/skills/paper-rank/rank.py
 python .claude/skills/paper-extract/extract.py
+# Inside Claude Code an agent-review pass on enriched_papers.json follows extract.py automatically;
+# outside Claude Code (this path) only the rule-based output is produced.
+python .claude/skills/paper-extract/verify_enriched.py    # stdlib faithfulness validator, exits 0 on clean output
 python .claude/skills/paper-network/network.py
 python .claude/skills/paper-report/report.py
 python .claude/skills/follow-up/followup.py "tell me more about rank 1"
@@ -115,7 +118,7 @@ Every script accepts `--input-dir <path>` to pin a specific run.
 | `categories` | string[] | no (default: `[]`) |
 | `max_results` | int | no (default: `50`) |
 
-**Output** — a per-run directory `output/<YYYY-MM-DD_HHMM_slug>/` containing the full chain `query.json → raw_papers.json → ranked_papers.json → enriched_papers.json → graph.json + graph_metrics.json → briefing.{md,json}`, plus `followups.jsonl` when `follow-up --save` is used.
+**Output** — a per-run directory `output/<YYYY-MM-DD_HHMM_slug>/` containing the full chain `query.json → raw_papers.json → ranked_papers.json → enriched_papers.json (+ enriched_papers.rule_based.json pre-review snapshot) → graph.json + graph_metrics.json → briefing.{md,json}`, plus `followups.jsonl` when `follow-up --save` is used.
 
 The user-facing artifact is `<run>/briefing.md`; `<run>/briefing.json` is the structured form that `follow-up` consumes.
 
