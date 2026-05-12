@@ -19,12 +19,12 @@ A six-skill agent that, given a natural-language research query (English or Chin
   - [Skills](#skills)
     - [1. `paper-search` — data entry into arXiv](#1-paper-search--data-entry-into-arxiv)
     - [2. `paper-rank` — BM25 + recency ranking](#2-paper-rank--bm25--recency-ranking)
-    - [3. `paper-extract` — rule-based structured extraction](#3-paper-extract--rule-based-structured-extraction)
+    - [3. `paper-extract` — rule-based extraction + agent-review pass](#3-paper-extract--rule-based-extraction--agent-review-pass)
     - [4. `paper-network` — graph analysis + metrics](#4-paper-network--graph-analysis--metrics)
     - [5. `paper-report` — daily briefing](#5-paper-report--daily-briefing)
     - [6. `follow-up` — grounded Q\&A over the cached run](#6-follow-up--grounded-qa-over-the-cached-run)
     - [Default I/O behavior every skill MUST implement](#default-io-behavior-every-skill-must-implement)
-  - [Contributions](#contributions)
+  - [Authorship and contributions](#authorship-and-contributions)
 
 ---
 
@@ -103,7 +103,8 @@ A single `paper-search` call is the only thing that creates a run dir and update
 ```
 arXiv-research-briefing-agent/
 ├── README.md                          # this file
-├── AGENTS.md                          # AGENTS.md
+├── CLAUDE.md                          # repo guidance for Claude Code
+├── FinalProjectGuidance.pdf           # course rubric
 │
 ├── .claude/
 │   └── skills/
@@ -113,7 +114,7 @@ arXiv-research-briefing-agent/
 │       ├── paper-rank/                # Skill 2 — BM25 + recency ranking
 │       │   ├── SKILL.md
 │       │   └── rank.py
-│       ├── paper-extract/             # Skill 3 — rule-based extraction
+│       ├── paper-extract/             # Skill 3 — rule-based extraction + agent-review pass
 │       │   ├── SKILL.md
 │       │   └── extract.py
 │       ├── paper-network/             # Skill 4 — graph + metrics
@@ -122,9 +123,17 @@ arXiv-research-briefing-agent/
 │       ├── paper-report/              # Skill 5 — daily briefing
 │       │   ├── SKILL.md
 │       │   └── report.py
-│       └── follow-up/                 # Skill 6 — grounded Q&A
-│           ├── SKILL.md
-│           └── followup.py
+│       ├── follow-up/                 # Skill 6 — grounded Q&A
+│       │   ├── SKILL.md
+│       │   └── followup.py
+│       │
+│       ├── sch-create/                # vendor: StudyClawHub toolkit
+│       ├── sch-deps/                  # vendor: dependency manager
+│       ├── sch-install/               # vendor: install from registry
+│       ├── sch-search/                # vendor: search registry
+│       ├── sch-submit/                # vendor: publish to registry
+│       ├── sch-delete/                # vendor: unregister
+│       └── latex-report/              # vendor: NeurIPS LaTeX scaffolding
 │
 └── output/
     ├── latest_run.txt                 # run_id of the most recent search
@@ -134,7 +143,8 @@ arXiv-research-briefing-agent/
         ├── query.json
         ├── raw_papers.json            # paper-search
         ├── ranked_papers.json         # paper-rank
-        ├── enriched_papers.json       # paper-extract
+        ├── enriched_papers.json       # paper-extract (rule-based, then agent-reviewed)
+        ├── enriched_papers.rule_based.json  # paper-extract (pre-review snapshot, written once)
         ├── graph.json                 # paper-network
         ├── graph_metrics.json         # paper-network
         ├── briefing.md                # paper-report
@@ -170,7 +180,7 @@ or
 find recent papers on diffusion models for medical imaging from the last 6 months
 ```
 
-Claude (the agent) recognizes the intent, parses it into `output/query.json`, and chains the six skills automatically: `paper-search` → `paper-rank` → `paper-extract` → `paper-network` → `paper-report`. The briefing is then rendered back into the conversation, and you can ask follow-up questions in the same plain-language style:
+Claude (the agent) recognizes the intent, parses it into `output/query.json`, and chains the six skills automatically: `paper-search` → `paper-rank` → `paper-extract` → `paper-network` → `paper-report`. `paper-extract` is itself a two-step stage: the deterministic `extract.py` writes `enriched_papers.json`, then Claude Code immediately performs an agent-review pass that revises any extraction field violating the verbatim-grounding contract (see `paper-extract/SKILL.md`); the pre-review snapshot is preserved at `enriched_papers.rule_based.json`. The briefing is then rendered back into the conversation, and you can ask follow-up questions in the same plain-language style:
 
 ```
 详细讲讲 ...
@@ -218,8 +228,13 @@ python .claude/skills/paper-search/search.py --query-file ./output/query.json
 # 3. Re-rank (BM25 + recency)
 python .claude/skills/paper-rank/rank.py
 
-# 4. Extract structured info for the top-20
+# 4. Extract structured info for the top-20.
+#    Inside Claude Code this is followed by an automatic agent-review pass on
+#    enriched_papers.json; outside Claude Code only the rule-based output is
+#    produced. Either way you can validate faithfulness with the stdlib
+#    verifier below.
 python .claude/skills/paper-extract/extract.py
+python .claude/skills/paper-extract/verify_enriched.py    # exits 0 on faithful output
 
 # 5. Build paper / author / category / topic graph + metrics
 python .claude/skills/paper-network/network.py
@@ -244,7 +259,7 @@ Every script supports `--input-dir <path>` to pin a specific run instead of usin
 |---|---|---|---|---|
 | 1 | `paper-search` | `output/query.json` | `<run>/raw_papers.json`, updates `latest_run.txt` | requires `arxiv` |
 | 2 | `paper-rank` | `<run>/raw_papers.json` | `<run>/ranked_papers.json` | requires `rank_bm25` |
-| 3 | `paper-extract` | `<run>/ranked_papers.json` | `<run>/enriched_papers.json` | yes |
+| 3 | `paper-extract` | `<run>/ranked_papers.json` | `<run>/enriched_papers.json` (+ `<run>/enriched_papers.rule_based.json` pre-review snapshot) | yes |
 | 4 | `paper-network` | `<run>/ranked_papers.json` (+ optional `enriched_papers.json`) | `<run>/graph.json`, `<run>/graph_metrics.json` | requires `networkx` |
 | 5 | `paper-report` | `<run>/{ranked,enriched,graph_metrics}.json` | `<run>/briefing.md`, `<run>/briefing.json` | yes |
 | 6 | `follow-up` | `<run>/briefing.json` (+ all earlier files) | answer to stdout, optional `<run>/followups.jsonl` | yes |
@@ -257,9 +272,14 @@ Translates the parsed `query.json` into an arXiv API call and writes deduplicate
 
 Scores every paper for query relevance and recency, then combines them as `final_score = 0.80 * relevance_norm + 0.20 * recency` (weights are CLI-configurable). Relevance comes from `BM25Okapi` over `title + abstract + categories`; recency is min-max normalized publish date. Preserves all input fields and adds `rank` + `scores` per paper.
 
-### 3. `paper-extract` — rule-based structured extraction
+### 3. `paper-extract` — rule-based extraction + agent-review pass
 
-Pulls eight structured fields (`main_contribution`, `method`, `task`, `keywords`, `datasets_or_domains`, `evaluation_signals`, `limitations`, `evidence_sentences`) from each top-N paper's title + abstract using word-boundary regex cue matching. Pure stdlib, no LLM, no PDF parsing.
+Pulls eight structured fields (`main_contribution`, `method`, `task`, `keywords`, `datasets_or_domains`, `evaluation_signals`, `limitations`, `evidence_sentences`) from each top-N paper's title + abstract. The skill is a two-step stage:
+
+1. **`extract.py` (`rule_based_v2`, stdlib only, byte-stable)** — word-boundary regex cue matching with abbreviation-aware sentence splitting; TF-IDF-weighted keyword scoring over the top-N corpus; three-tier `method` fallback; tiered `limitations` (strong cues fire anywhere, weak cues only in the abstract's second half); dataset extraction with a generic-acronym blacklist and a hyphenated versioned-dataset regex (`CIFAR-10`, `ImageNet-1K`, ...); `evidence_sentences` picks the second corroborating sentence rather than duplicating the claim.
+2. **Agent-review pass (default, automatic inside Claude Code)** — immediately after `extract.py`, Claude Code revises any field that fails the verbatim-grounding contract (every keyword / dataset / sentence must be word-boundary present in the paper's own title + abstract; `limitations` must state the paper's own limitation, not field-level scarcity). The pre-review snapshot is preserved at `enriched_papers.rule_based.json`. No API key, no network call — the LLM is Claude Code itself, in the orchestration layer.
+
+`verify_enriched.py` is the stdlib-only faithfulness validator for either snapshot; both files exit 0 on the JEPA test run.
 
 ### 4. `paper-network` — graph analysis + metrics
 
