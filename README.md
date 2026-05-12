@@ -117,6 +117,7 @@ arXiv-research-briefing-agent/
 │       ├── paper-extract/             # Skill 3 — rule-based extraction + agent-review pass
 │       │   ├── SKILL.md
 │       │   └── extract.py
+│       │   └── verify_enriched.py
 │       ├── paper-network/             # Skill 4 — graph + metrics
 │       │   ├── SKILL.md
 │       │   └── network.py
