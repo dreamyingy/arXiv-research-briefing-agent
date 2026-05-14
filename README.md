@@ -24,7 +24,7 @@ A six-skill agent that, given a natural-language research query (English or Chin
     - [5. `paper-report` — daily briefing](#5-paper-report--daily-briefing)
     - [6. `follow-up` — grounded Q\&A over the cached run](#6-follow-up--grounded-qa-over-the-cached-run)
     - [Default I/O behavior every skill MUST implement](#default-io-behavior-every-skill-must-implement)
-  - [Authorship and contributions](#authorship-and-contributions)
+  - [Contributions](#contributions)
 
 ---
 
@@ -46,7 +46,7 @@ and the agent will:
 4. Extract structured signals (contribution / method / task / keywords / datasets / evaluation / limitations) for the top-N.
 5. Build a paper / author / category / topic graph and a paper-paper projection, and compute centrality / novelty / bridging metrics for every paper.
 6. Render a Markdown + JSON daily briefing.
-7. Answer follow-up questions (*"tell me more about rank 1"*, *"compare paper A vs B"*) entirely from the cached run, with no extra arXiv calls and no LLM.
+7. Answer follow-up questions (*"tell me more about rank 1"*, *"compare paper A vs B"*) from the cached run. Also answer more smartly with API keys.
 
 The whole run is cached on disk under a single `output/<run_id>/` directory, so the briefing is fully reproducible and the follow-up skill is grounded.
 
@@ -270,21 +270,27 @@ Scores every paper for query relevance and recency, then combines them as `final
 Pulls eight structured fields (`main_contribution`, `method`, `task`, `keywords`, `datasets_or_domains`, `evaluation_signals`, `limitations`, `evidence_sentences`) from each top-N paper's title + abstract. The skill is a two-step stage:
 
 1. **`extract.py` (`rule_based_v2`, stdlib only, byte-stable)** — word-boundary regex cue matching with abbreviation-aware sentence splitting; TF-IDF-weighted keyword scoring over the top-N corpus; three-tier `method` fallback; tiered `limitations` (strong cues fire anywhere, weak cues only in the abstract's second half); dataset extraction with a generic-acronym blacklist and a hyphenated versioned-dataset regex (`CIFAR-10`, `ImageNet-1K`, ...); `evidence_sentences` picks the second corroborating sentence rather than duplicating the claim.
-2. **Agent-review pass (default, automatic inside Claude Code)** — immediately after `extract.py`, Claude Code revises any field that fails the verbatim-grounding contract (every keyword / dataset / sentence must be word-boundary present in the paper's own title + abstract; `limitations` must state the paper's own limitation, not field-level scarcity). The pre-review snapshot is preserved at `enriched_papers.rule_based.json`. No API key, no network call — the LLM is Claude Code itself, in the orchestration layer.
+2. **Agent-review pass (default, automatic inside Claude Code)** — immediately after `extract.py`, Claude Code revises any field that fails the verbatim-grounding contract (every keyword / dataset / sentence must be word-boundary present in the paper's own title + abstract; `limitations` must state the paper's own limitation, not field-level scarcity). The pre-review snapshot is preserved at `enriched_papers.rule_based.json`.
 
 `verify_enriched.py` is the stdlib-only faithfulness validator for either snapshot; both files exit 0 on the JEPA test run.
 
 ### 4. `paper-network` — graph analysis + metrics
 
-Builds a heterogeneous `paper` / `author` / `category` / `topic` graph plus a paper-paper projection (default edge weights `3.0` / `1.5` / `1.0` for shared authors / categories / topics), then computes nine `graph_metrics` per paper: five centrality / novelty scores (`degree_centrality`, `betweenness_centrality`, `pagerank`, `bridging_score`, `novelty`) plus four feature counts. Implementation uses `networkx`.
+Builds a heterogeneous `paper` / `author` / `category` / `topic` graph plus a weighted paper-paper projection (default edge weights `3.0` / `1.5` / `1.0` for shared authors / categories / topics). It now detects weighted-modularity research communities, summarizes recurring authors and topics, finds each paper's nearest cached neighbors, and adds report-friendly network fields such as `community_id`, `community_label`, `network_role`, `network_signals`, and `network_value_score` in addition to centrality / novelty metrics (`degree_centrality`, `betweenness_centrality`, `pagerank`, `bridging_score`, `novelty`, `weighted_degree`).
+
+For non-empty corpora it also renders deterministic SVG visualizations without extra plotting dependencies: `network_communities.svg` for the full paper projection colored by community, and `network_top_papers.svg` for top-ranked papers plus their strongest cached neighbors. These files are listed in `graph.json.visualizations` so downstream reporting and the web UI can embed them directly. Implementation uses `networkx`.
 
 ### 5. `paper-report` — daily briefing
 
-Joins `ranked_papers.json`, `enriched_papers.json`, and `graph_metrics.json` by canonical `id` and renders a Markdown briefing (top-N table + four-way highlights + per-paper notes) plus a structured `briefing.json` for `follow-up`. Pure stdlib.
+Joins `ranked_papers.json`, `enriched_papers.json`, `graph_metrics.json`, and optional `graph.json` by canonical `id`, then renders a network-aware reading portfolio rather than a plain search-rank table. The upstream search `rank` and `scores.final_score` are preserved, while the report adds separate `recommendation_rank` and `recommendation_score` fields. The portfolio score combines text relevance, network value, novelty, normalized bridging, community/topic diversity bonuses, bridge-role bonuses, and redundancy penalties against already selected papers.
+
+The generated `briefing.md` includes corpus statistics, highlights including `top_recommendation` and `highest_network_value`, a research map, embedded SVG network visualizations, a "Recommended Reading Portfolio" table with both recommendation rank and search rank, and per-paper recommendation explanations with score components, selection reason, evidence, caveats, extraction notes, and graph context. `briefing.json` stores the same structure for `follow-up`. Pure stdlib.
 
 ### 6. `follow-up` — grounded Q&A over the cached run
 
-Answers paper-detail, comparison, network-highlight, and keyword-search questions using only cached run JSON — no LLM, no arXiv calls. Cites paper IDs, ranks, URLs, and `evidence_sentences`; optional `--save` appends `{question, answer}` rows to `<run>/followups.jsonl`.
+Answers paper-detail, comparison, recommendation-reason, reading-plan, similar-paper, community-map, network-highlight, practicality / reproducibility, and keyword-search questions using cached run JSON. By default it makes no arXiv calls and no LLM calls; optionally `--llm-provider deepseek` or `--llm-provider openai-compatible` can synthesize a grounded answer from the cached JSON context, falling back to deterministic templates if the API key or request fails.
+
+When `briefing.json` contains `recommendation_rank`, list-style answers use recommendation order. Plain `rank 1` remains the upstream search rank for backwards compatibility; use `rec 1` or `recommendation rank 1` to target the portfolio rank. Answers cite cached paper IDs, ranks, URLs, recommendation fields, graph metrics, and `evidence_sentences`; optional `--save` appends `{question, answer}` rows to `<run>/followups.jsonl`.
 
 ---
 
