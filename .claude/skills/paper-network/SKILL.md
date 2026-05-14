@@ -2,7 +2,7 @@
 name: paper-network
 description: "Build paper/author/category/topic networks from ranked_papers.json plus optional enriched_papers.json, compute graph metrics for every paper, and write graph.json and graph_metrics.json. Trigger phrases: 'paper-network', 'build paper graph', 'network analysis for papers', '论文网络分析', '运行 paper-network'."
 author: dreamyingy
-version: 1.0.0
+version: 1.1.0
 tags:
   - arxiv
   - network
@@ -12,7 +12,7 @@ tags:
 
 # paper-network
 
-Stage 4 of the daily arXiv briefing agent. Reads the current run's `ranked_papers.json` and optional `enriched_papers.json`, builds a heterogeneous paper/author/category/topic graph plus a paper-paper projection graph, computes network metrics for every ranked paper, and writes `graph.json` and `graph_metrics.json` into the same run directory.
+Stage 4 of the daily arXiv briefing agent. Reads the current run's `ranked_papers.json` and optional `enriched_papers.json`, builds a heterogeneous paper/author/category/topic graph plus a paper-paper projection graph, detects research communities and social network signals, computes network metrics for every ranked paper, renders deterministic SVG network visualizations, and writes `graph.json` and `graph_metrics.json` into the same run directory.
 
 It does **not** search arXiv, rank papers, extract paper content, or generate the final report.
 
@@ -47,6 +47,7 @@ Optional flags:
 
 - Confirm `<input-dir>/graph.json` exists.
 - Confirm `<input-dir>/graph_metrics.json` exists.
+- Confirm `<input-dir>/network_communities.svg` exists when the corpus is non-empty.
 - Confirm `graph_metrics.count == ranked_papers.count`.
 - Spot-check that every paper has `graph_metrics.degree_centrality`, `betweenness_centrality`, `pagerank`, `novelty`, and `bridging_score`.
 
@@ -56,7 +57,7 @@ Optional flags:
 
 - **Reads** `<run_dir>/ranked_papers.json` for the full paper corpus.
 - **Optionally reads** `<run_dir>/enriched_papers.json` for top-N extracted keywords/domains.
-- **Writes** `<run_dir>/graph.json` and `<run_dir>/graph_metrics.json`.
+- **Writes** `<run_dir>/graph.json`, `<run_dir>/graph_metrics.json`, and SVG visualization files such as `<run_dir>/network_communities.svg`.
 - **Does not** create a new run directory and **does not** modify `latest_run.txt`.
 
 Downstream `paper-report` should join graph metrics by the canonical per-paper `id`.
@@ -70,7 +71,7 @@ Downstream `paper-report` should join graph metrics by the canonical per-paper `
   "ranked_at": "...",
   "networked_at": "2026-05-07T10:00:00+00:00",
   "network_config": {
-    "method": "heterogeneous_graph_plus_paper_projection_v1",
+    "method": "heterogeneous_graph_plus_paper_projection_v2",
     "topic_limit": 8,
     "include_topics": true,
     "min_paper_edge_weight": 1.0,
@@ -81,8 +82,36 @@ Downstream `paper-report` should join graph metrics by the canonical per-paper `
     "node_count": 120,
     "edge_count": 260,
     "paper_projection_node_count": 21,
-    "paper_projection_edge_count": 73
+    "paper_projection_edge_count": 73,
+    "community_count": 4
   },
+  "communities": [
+    {
+      "community_id": 1,
+      "label": "jepa, representation, vision",
+      "size": 7,
+      "paper_ids": ["2502.18056"],
+      "top_topics": [{"label": "jepa", "count": 4}],
+      "top_categories": [{"label": "cs.CV", "count": 7}],
+      "key_authors": [{"name": "Alice Smith", "paper_count": 2}],
+      "representative_papers": ["2502.18056"]
+    }
+  ],
+  "social_summary": {
+    "community_count": 4,
+    "influential_authors": [],
+    "recurring_topics": []
+  },
+  "visualizations": [
+    {
+      "name": "network_communities",
+      "path": "network_communities.svg",
+      "description": "Nodes are papers; colors are detected communities; labels mark top-ranked papers.",
+      "format": "svg",
+      "node_count": 21,
+      "edge_count": 73
+    }
+  ],
   "nodes": [
     {
       "node_id": "paper:2502.18056",
@@ -137,6 +166,20 @@ Same row-per-paper shape as `ranked_papers.json`, preserving all ranked paper fi
         "weighted_degree": 7.5,
         "novelty": 0.25,
         "bridging_score": 0.08,
+        "network_value_score": 0.72,
+        "network_role": "bridge_hub",
+        "network_signals": ["central to the retrieved paper network"],
+        "community_id": 1,
+        "community_label": "jepa, representation, vision",
+        "community_size": 7,
+        "nearest_neighbors": [
+          {
+            "id": "2604.10591",
+            "weight": 2.5,
+            "types": ["shared-topic"],
+            "shared_features": ["topic:jepa"]
+          }
+        ],
         "author_count": 4,
         "topic_count": 8,
         "category_count": 2
@@ -161,7 +204,7 @@ The script builds two related graphs:
    - default weights: shared author `3.0`, shared category `1.5`, shared topic `1.0`
    - very common features are ignored for projection edges by default, so a broad category shared by nearly every result does not make the paper graph fully connected
 
-Metrics are computed on the paper projection graph:
+Metrics and social information are computed on the paper projection graph:
 
 - `degree_centrality`: NetworkX degree centrality on paper-paper edges.
 - `betweenness_centrality`: NetworkX weighted betweenness centrality.
@@ -169,6 +212,20 @@ Metrics are computed on the paper projection graph:
 - `weighted_degree`: sum of paper-paper edge weights.
 - `bridging_score`: same value as betweenness centrality, exposed under a report-friendly name.
 - `novelty`: `1 - normalized(weighted_degree)`, so papers sharing fewer features with the corpus score as more novel.
+- `community_id`, `community_label`, `community_size`: research community assignment from weighted modularity detection.
+- `nearest_neighbors`: strongest cached paper-paper links with edge types and shared features.
+- `network_role`: report-friendly role such as `community_core`, `bridge_hub`, `cross_community_bridge`, `novel_outlier`, or `isolated_novel`.
+- `network_value_score`: combined score from normalized PageRank, bridging, novelty, and weighted degree.
+- `social_summary`: recurring authors and topics across the retrieved paper network.
+
+## Visualizations
+
+For non-empty corpora, `paper-network` renders deterministic SVG files with no extra plotting dependencies:
+
+- `network_communities.svg` — full paper projection graph, colored by detected research community. Node size reflects PageRank/network value; edge width reflects shared-feature strength.
+- `network_top_papers.svg` — focused view of top-ranked papers plus their strongest cached neighbors, when that subgraph is smaller than the full projection graph.
+
+These files are referenced from `graph.json.visualizations` so `paper-report` can embed them directly in `briefing.md`.
 
 ## Error handling
 
@@ -181,6 +238,7 @@ Metrics are computed on the paper projection graph:
 | `enriched_papers.json` missing | emit `WARN`, fall back to title/abstract/category topics |
 | `papers` empty | write empty `graph.json` and `graph_metrics.json`, emit `WARN`, exit 0 |
 | `networkx` missing | exit non-zero with install hint (`pip install networkx`) |
+| SVG rendering fails because graph is empty | skip visualization and keep `visualizations: []` |
 | paper missing authors/categories/abstract | use empty defaults and continue |
 
 ## Dependencies
@@ -194,4 +252,5 @@ Metrics are computed on the paper projection graph:
 - **schema preservation** — every field in each ranked paper is preserved unchanged; only `graph_metrics` is added.
 - **join check** — every paper node in `graph.json` has canonical `id` matching a row in `graph_metrics.json`.
 - **metric range check** — `degree_centrality`, `betweenness_centrality`, `pagerank`, `novelty`, and `bridging_score` are non-negative; normalized metrics are in `[0, 1]`.
+- **visualization check** — non-empty corpora write `network_communities.svg` and list it in `graph.json.visualizations`.
 - **empty handling** — empty `ranked_papers.json` writes valid empty outputs and exits 0.

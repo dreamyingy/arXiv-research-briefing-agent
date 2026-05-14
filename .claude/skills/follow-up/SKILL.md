@@ -2,7 +2,7 @@
 name: follow-up
 description: "Answer follow-up questions about the current arXiv briefing using only cached run artifacts such as briefing.json, enriched_papers.json, ranked_papers.json, and graph_metrics.json. Trigger phrases: 'follow-up', 'ask about this briefing', 'tell me more about rank 1', 'compare paper A and B', '追问论文', '运行 follow-up'."
 author: dreamyingy
-version: 1.0.0
+version: 1.1.0
 tags:
   - arxiv
   - qa
@@ -12,7 +12,7 @@ tags:
 
 # follow-up
 
-Stage 6 of the daily arXiv briefing agent. Answers follow-up questions using only the cached JSON artifacts in the current run directory. It does **not** call arXiv, does **not** call an LLM, and does **not** invent missing paper facts.
+Stage 6 of the daily arXiv briefing agent. Answers follow-up questions using cached JSON artifacts in the current run directory. By default it does **not** call arXiv, does **not** call an LLM, and does **not** invent missing paper facts. Optionally, it can call a grounded OpenAI-compatible chat endpoint such as DeepSeek for synthesis, while still constraining the answer to cached artifacts.
 
 ## Workflow
 
@@ -42,14 +42,41 @@ Optional flags:
 | `--question` | string | none | follow-up question |
 | `--top-k` | int | `5` | number of papers for list/search answers |
 | `--save` | bool | false | append question/answer JSON to `followups.jsonl` |
+| `--llm-provider` | enum | `none` | `none`, `deepseek`, or `openai-compatible` |
+| `--llm-base-url` | string | provider default | OpenAI-compatible chat completions URL |
+| `--llm-model` | string | provider default | model name |
+
+DeepSeek example:
+
+```bash
+export DEEPSEEK_API_KEY=...
+python followup.py --question "给我一条阅读路线" --llm-provider deepseek
+```
+
+Generic OpenAI-compatible endpoint:
+
+```bash
+export LLM_API_KEY=...
+python followup.py --question "which paper should I reproduce?" \
+  --llm-provider openai-compatible \
+  --llm-base-url https://example.com/v1/chat/completions \
+  --llm-model my-model
+```
 
 ## Supported question shapes
 
 - **Paper detail**: `tell me more about rank 1`, `paper 2502.18056`, title substring.
 - **Comparison**: `compare rank 1 and rank 3`, `compare 2502.18056 vs 2604.10591`.
 - **Network highlights**: questions containing `novel`, `bridging`, `central`, `pagerank`.
+- **Recommendation reasons**: `why recommend rank 1`, `为什么推荐 rank 1`, `why recommendation rank 1`, `which papers are must-read?`.
+- **Reading plan**: `give me a reading plan`, `给我阅读路线`, `怎么读这些论文？`.
+- **Similar papers**: `similar to rank 1`, `nearest neighbors of 2502.18056`.
+- **Communities / research map**: `show communities`, `按研究方向分组`.
+- **Practicality / reproducibility signals**: `which papers have datasets/evaluation?`, `哪篇适合复现？`.
 - **Relevance / keyword search**: questions such as `which papers are most related to JEPA?`; the script searches title, keywords, contribution, method, task, and abstract snippets from cached files.
-- **Fallback summary**: if the question is broad or ambiguous, show the top ranked papers and suggest stable identifiers the user can ask about.
+- **Fallback summary**: if the question is broad or ambiguous, show the top recommended papers and suggest stable identifiers the user can ask about.
+
+When `briefing.json` contains `recommendation_rank`, follow-up lists papers in recommendation order. Plain `rank 1` still refers to the upstream search rank; use `recommendation rank 1` or `rec 1` to target the portfolio rank.
 
 ## Grounding rules
 
@@ -58,6 +85,7 @@ Optional flags:
 - Cite paper IDs, ranks, and URLs whenever possible.
 - Preserve evidence sentences from `extraction.evidence_sentences` for contribution/method/task claims.
 - Do not infer claims from outside the cached artifacts.
+- If LLM synthesis is enabled, pass only cached JSON context to the model. If the API key or request fails, fall back to deterministic template answers.
 
 ## Output
 

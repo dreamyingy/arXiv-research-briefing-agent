@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib import request as urlrequest
+from urllib.error import URLError
 
 
 ID_RE = re.compile(r"\b\d{4}\.\d{4,5}\b")
+REC_RANK_RE = re.compile(r"(?:rec(?:ommendation)?(?:\s*rank)?|推荐(?:排序|第)?)\s*(\d+)", re.IGNORECASE)
 RANK_RE = re.compile(r"(?:rank|#|第)\s*(\d+)", re.IGNORECASE)
 TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
 
@@ -20,6 +24,8 @@ STOPWORDS = {
     "papers", "rank", "related", "show", "tell", "the", "this", "to", "vs",
     "what", "which", "with", "compare", "most", "are", "about", "please",
 }
+
+LLM_PROVIDERS = {"none", "deepseek", "openai-compatible"}
 
 
 def resolve_input_dir(input_dir_flag: Path | None) -> Path:
@@ -65,7 +71,7 @@ def merge_paper(base: dict, *overlays: dict | None) -> dict:
         if not isinstance(overlay, dict):
             continue
         for key, value in overlay.items():
-            if key in {"extraction", "graph_metrics", "scores"} and isinstance(value, dict):
+            if key in {"extraction", "graph_metrics", "scores", "recommendation"} and isinstance(value, dict):
                 existing = merged.get(key, {})
                 if isinstance(existing, dict):
                     merged[key] = {**existing, **value}
@@ -81,6 +87,13 @@ def load_context(run_dir: Path) -> tuple[dict, list[dict]]:
     ranked = load_json(run_dir / "ranked_papers.json")
     enriched = load_json(run_dir / "enriched_papers.json")
     graph_metrics = load_json(run_dir / "graph_metrics.json")
+    graph = load_json(run_dir / "graph.json")
+
+    if not briefing.get("research_map") and graph:
+        briefing["research_map"] = {
+            "communities": graph.get("communities", []),
+            "social_summary": graph.get("social_summary", {}),
+        }
 
     ranked_by_id = index_by_id(ranked)
     briefing_by_id = index_by_id(briefing)
@@ -102,7 +115,10 @@ def load_context(run_dir: Path) -> tuple[dict, list[dict]]:
         )
         for pid in ids
     ]
-    papers.sort(key=lambda p: int(p.get("rank") or 10**9))
+    papers.sort(key=lambda p: (
+        int(p.get("recommendation_rank") or 10**9),
+        int(p.get("rank") or 10**9),
+    ))
     return briefing, papers
 
 
@@ -134,7 +150,9 @@ def short_authors(authors: list[str], limit: int = 4) -> str:
 
 
 def paper_label(paper: dict) -> str:
-    return f"Rank {paper.get('rank', '?')} `{paper.get('id', '?')}`: {paper.get('title', '')}"
+    rec_rank = paper.get("recommendation_rank")
+    prefix = f"Rec {rec_rank} / Search {paper.get('rank', '?')}" if rec_rank else f"Rank {paper.get('rank', '?')}"
+    return f"{prefix} `{paper.get('id', '?')}`: {paper.get('title', '')}"
 
 
 def available_identifiers(papers: list[dict], top_k: int = 5) -> str:
@@ -147,6 +165,13 @@ def available_identifiers(papers: list[dict], top_k: int = 5) -> str:
 def find_paper_by_rank(papers: list[dict], rank: int) -> dict | None:
     for paper in papers:
         if int(paper.get("rank") or -1) == rank:
+            return paper
+    return None
+
+
+def find_paper_by_recommendation_rank(papers: list[dict], rank: int) -> dict | None:
+    for paper in papers:
+        if int(paper.get("recommendation_rank") or -1) == rank:
             return paper
     return None
 
@@ -186,6 +211,12 @@ def identify_papers(question: str, papers: list[dict]) -> list[dict]:
             found.append(paper)
             seen.add(paper_id)
 
+    for rank_s in REC_RANK_RE.findall(question):
+        paper = find_paper_by_recommendation_rank(papers, int(rank_s))
+        if paper and str(paper.get("id")) not in seen:
+            found.append(paper)
+            seen.add(str(paper.get("id")))
+
     for rank_s in RANK_RE.findall(question):
         paper = find_paper_by_rank(papers, int(rank_s))
         if paper and str(paper.get("id")) not in seen:
@@ -214,10 +245,49 @@ def scores(paper: dict) -> dict:
     return sc if isinstance(sc, dict) else {}
 
 
+def recommendation(paper: dict) -> dict:
+    rec = paper.get("recommendation", {})
+    if isinstance(rec, dict) and rec:
+        return rec
+    gm = graph_metrics(paper)
+    sc = scores(paper)
+    rank = int(paper.get("rank") or 10**9)
+    novelty = float(gm.get("novelty", 0.0) or 0.0)
+    role = gm.get("network_role", "ranked_candidate")
+    if "bridge" in str(role):
+        label = "Bridge"
+    elif "core" in str(role):
+        label = "Core"
+    elif novelty >= 0.70:
+        label = "Novel"
+    elif rank <= 10:
+        label = "Relevant"
+    else:
+        label = "Context"
+    priority = "must-read" if rank <= 3 or label in {"Bridge", "Core"} else ("skim" if rank <= 10 else "optional")
+    evidence = []
+    if rank < 10**9:
+        evidence.append(f"rank {rank} in cached ranking")
+    if sc.get("final_score") is not None:
+        evidence.append(f"final score {fmt_score(sc.get('final_score'))}")
+    if gm.get("network_value_score") is not None:
+        evidence.append(f"network value {fmt_score(gm.get('network_value_score'))}")
+    return {
+        "label": label,
+        "read_priority": priority,
+        "network_role": role,
+        "why_recommended": f"Included as a {label.lower()} cached paper based on rank/network signals.",
+        "best_for": ["background scanning"] if label == "Context" else ["focused reading"],
+        "evidence": evidence,
+        "caveats": ["no generated recommendation object was cached for this paper"],
+    }
+
+
 def answer_detail(paper: dict) -> str:
     ext = extraction(paper)
     gm = graph_metrics(paper)
     sc = scores(paper)
+    rec = recommendation(paper)
     evidence = ext.get("evidence_sentences", {}) if isinstance(ext.get("evidence_sentences"), dict) else {}
     lines = [
         f"## {paper_label(paper)}",
@@ -226,7 +296,9 @@ def answer_detail(paper: dict) -> str:
         f"- Published: {paper.get('published', 'unavailable')}; category: {paper.get('primary_category', 'unavailable')}",
         f"- URL: {paper.get('url', 'unavailable')}",
         f"- Scores: final={fmt_score(sc.get('final_score'))}, relevance={fmt_score(sc.get('relevance_score_normalized'))}, recency={fmt_score(sc.get('recency_score'))}",
-        f"- Graph: PageRank={fmt_score(gm.get('pagerank'))}, novelty={fmt_score(gm.get('novelty'))}, bridging={fmt_score(gm.get('bridging_score'))}",
+        f"- Graph: role={gm.get('network_role', 'unavailable')}, community={gm.get('community_label', 'unavailable')}, PageRank={fmt_score(gm.get('pagerank'))}, novelty={fmt_score(gm.get('novelty'))}, bridging={fmt_score(gm.get('bridging_score'))}, network_value={fmt_score(gm.get('network_value_score'))}",
+        f"- Recommendation: {rec.get('label', 'Context')} / {rec.get('read_priority', 'optional')}. {rec.get('why_recommended', 'No generated recommendation reason is cached yet.')}",
+        f"- Best for: {', '.join(rec.get('best_for', []) or []) or 'unavailable'}",
         "",
         "**Cached extraction**",
         "",
@@ -237,6 +309,8 @@ def answer_detail(paper: dict) -> str:
         f"- Datasets/domains: {', '.join(ext.get('datasets_or_domains', []) or []) or 'unavailable'}",
         f"- Evaluation signals: {'; '.join(ext.get('evaluation_signals', []) or []) or 'unavailable'}",
         f"- Limitations: {ext.get('limitations') or 'not found in cached abstract extraction'}",
+        f"- Recommendation evidence: {'; '.join(rec.get('evidence', []) or []) or 'unavailable'}",
+        f"- Caveats: {'; '.join(rec.get('caveats', []) or []) or 'none cached'}",
         "",
         "**Evidence sentences**",
         "",
@@ -256,6 +330,8 @@ def answer_compare(papers: list[dict]) -> str:
         ("Final score", fmt_score(scores(left).get("final_score")), fmt_score(scores(right).get("final_score"))),
         ("PageRank", fmt_score(graph_metrics(left).get("pagerank")), fmt_score(graph_metrics(right).get("pagerank"))),
         ("Novelty", fmt_score(graph_metrics(left).get("novelty")), fmt_score(graph_metrics(right).get("novelty"))),
+        ("Network role", graph_metrics(left).get("network_role", ""), graph_metrics(right).get("network_role", "")),
+        ("Recommendation", recommendation(left).get("why_recommended", ""), recommendation(right).get("why_recommended", "")),
         ("Contribution", extraction(left).get("main_contribution", ""), extraction(right).get("main_contribution", "")),
         ("Method", extraction(left).get("method", ""), extraction(right).get("method", "")),
         ("Task", extraction(left).get("task", ""), extraction(right).get("task", "")),
@@ -327,9 +403,10 @@ def answer_search(question: str, papers: list[dict], top_k: int) -> str:
     ]
     for _, paper in scored[:top_k]:
         ext = extraction(paper)
+        rec = recommendation(paper)
         lines.append(
             f"- {paper_label(paper)} | final={fmt_score(scores(paper).get('final_score'))} | "
-            f"keywords={', '.join(ext.get('keywords', [])[:5] if ext.get('keywords') else [])} | {paper.get('url', '')}"
+            f"{rec.get('label', 'Context')} | keywords={', '.join(ext.get('keywords', [])[:5] if ext.get('keywords') else [])} | {paper.get('url', '')}"
         )
     return "\n".join(lines)
 
@@ -361,6 +438,9 @@ def answer_network(question: str, papers: list[dict], top_k: int) -> str:
             metric_parts.append(f"novelty={fmt_score(gm.get('novelty'))}")
         if key != "bridging_score":
             metric_parts.append(f"bridging={fmt_score(gm.get('bridging_score'))}")
+        role = gm.get("network_role")
+        if role:
+            metric_parts.append(f"role={role}")
         lines.append(f"- {paper_label(paper)} | {' | '.join(metric_parts)} | {paper.get('url', '')}")
     return "\n".join(lines)
 
@@ -368,10 +448,203 @@ def answer_network(question: str, papers: list[dict], top_k: int) -> str:
 def answer_top(papers: list[dict], top_k: int) -> str:
     lines = ["## Top Ranked Cached Papers", ""]
     for paper in papers[:top_k]:
+        rec = recommendation(paper)
         lines.append(
-            f"- {paper_label(paper)} | final={fmt_score(scores(paper).get('final_score'))} | {paper.get('url', '')}"
+            f"- {paper_label(paper)} | final={fmt_score(scores(paper).get('final_score'))} | "
+            f"{rec.get('label', 'Context')} / {rec.get('read_priority', 'optional')} | {paper.get('url', '')}"
         )
     return "\n".join(lines)
+
+
+def answer_recommendations(papers: list[dict], top_k: int) -> str:
+    def priority_rank(paper: dict) -> tuple[int, int, int]:
+        priority = recommendation(paper).get("read_priority", "optional")
+        order = {"must-read": 0, "skim": 1, "optional": 2}
+        return (
+            int(paper.get("recommendation_rank") or 10**9),
+            order.get(priority, 3),
+            int(paper.get("rank") or 10**9),
+        )
+
+    ranked = sorted(papers, key=priority_rank)
+    lines = ["## Recommended Reading Picks", ""]
+    for paper in ranked[:top_k]:
+        rec = recommendation(paper)
+        lines.append(f"- {paper_label(paper)}")
+        lines.append(f"  Reason: {rec.get('why_recommended', 'included by upstream ranking')}")
+        lines.append(f"  Best for: {', '.join(rec.get('best_for', []) or []) or 'background scanning'}")
+        lines.append(f"  Evidence: {'; '.join(rec.get('evidence', [])[:4]) or 'unavailable'}")
+    return "\n".join(lines)
+
+
+def answer_reading_plan(papers: list[dict], top_k: int) -> str:
+    core = [
+        p for p in papers
+        if recommendation(p).get("read_priority") == "must-read"
+        or graph_metrics(p).get("network_role") in {"community_core", "bridge_hub"}
+    ][:3]
+    novel = sorted(papers, key=lambda p: float(graph_metrics(p).get("novelty", 0.0) or 0.0), reverse=True)[:2]
+    bridge = sorted(papers, key=lambda p: float(graph_metrics(p).get("bridging_score", 0.0) or 0.0), reverse=True)[:2]
+
+    ordered: list[tuple[str, dict]] = []
+    seen: set[str] = set()
+    for label, group in [("Start here", core), ("Then map adjacent threads", bridge), ("Finish with novelty scan", novel)]:
+        for paper in group:
+            pid = str(paper.get("id"))
+            if pid not in seen:
+                ordered.append((label, paper))
+                seen.add(pid)
+    if not ordered:
+        ordered = [("Start here", p) for p in papers[:top_k]]
+
+    lines = ["## Reading Plan", ""]
+    for idx, (step, paper) in enumerate(ordered[:top_k], start=1):
+        rec = recommendation(paper)
+        lines.append(
+            f"{idx}. **{step}**: {paper_label(paper)} | "
+            f"{rec.get('label', 'Context')} | {rec.get('why_recommended', '')} | {paper.get('url', '')}"
+        )
+    return "\n".join(lines)
+
+
+def answer_communities(briefing: dict, papers: list[dict], top_k: int) -> str:
+    research_map = briefing.get("research_map", {}) if isinstance(briefing.get("research_map"), dict) else {}
+    communities = research_map.get("communities", []) if isinstance(research_map, dict) else []
+    if not communities:
+        return "No cached community map is available. Run paper-network and paper-report again to refresh graph insights."
+
+    by_id = {str(p.get("id")): p for p in papers}
+    lines = ["## Cached Research Communities", ""]
+    for community in communities[:top_k]:
+        lines.append(
+            f"- Community {community.get('community_id')}: **{community.get('label', '')}** "
+            f"({community.get('size', 0)} papers)"
+        )
+        reps = []
+        for pid in community.get("representative_papers", [])[:3]:
+            paper = by_id.get(str(pid))
+            reps.append(paper_label(paper) if paper else f"`{pid}`")
+        if reps:
+            lines.append(f"  Representative papers: {'; '.join(reps)}")
+        topics = ", ".join(item.get("label", "") for item in community.get("top_topics", [])[:5])
+        if topics:
+            lines.append(f"  Topics: {topics}")
+    return "\n".join(lines)
+
+
+def answer_similar(question: str, papers: list[dict], top_k: int) -> str:
+    identified = identify_papers(question, papers)
+    if not identified:
+        return "Tell me which cached paper to use as the anchor, for example `similar to rank 1`.\n\n" + available_identifiers(papers, top_k)
+    anchor = identified[0]
+    by_id = {str(p.get("id")): p for p in papers}
+    neighbors = graph_metrics(anchor).get("nearest_neighbors", [])
+    if not neighbors:
+        return f"No cached nearest-neighbor links are available for {paper_label(anchor)}."
+    lines = [f"## Papers Similar To {paper_label(anchor)}", ""]
+    for item in neighbors[:top_k]:
+        paper = by_id.get(str(item.get("id")))
+        label = paper_label(paper) if paper else f"`{item.get('id')}`"
+        shared = ", ".join(item.get("shared_features", [])[:5]) or "shared network features"
+        lines.append(
+            f"- {label} | edge_weight={fmt_score(item.get('weight'))} | shared={shared}"
+        )
+    return "\n".join(lines)
+
+
+def answer_practical(papers: list[dict], top_k: int) -> str:
+    scored = []
+    for paper in papers:
+        ext = extraction(paper)
+        score = 0
+        score += len(ext.get("evaluation_signals", []) or []) * 2
+        score += len(ext.get("datasets_or_domains", []) or [])
+        if paper.get("comment"):
+            score += 1
+        if score:
+            scored.append((score, paper))
+    scored.sort(key=lambda item: (-item[0], int(item[1].get("rank") or 10**9)))
+    if not scored:
+        return "No cached papers expose strong evaluation or dataset signals in the current extraction."
+    lines = ["## Most Practical / Evidence-Rich Cached Papers", ""]
+    for score, paper in scored[:top_k]:
+        ext = extraction(paper)
+        lines.append(
+            f"- {paper_label(paper)} | practical_signal={score} | "
+            f"datasets={', '.join(ext.get('datasets_or_domains', [])[:4] if ext.get('datasets_or_domains') else []) or 'unavailable'} | "
+            f"evaluation={'; '.join(ext.get('evaluation_signals', [])[:2] if ext.get('evaluation_signals') else []) or 'unavailable'}"
+        )
+    return "\n".join(lines)
+
+
+def llm_context(briefing: dict, papers: list[dict], top_k: int) -> str:
+    rows = []
+    for paper in papers[:max(top_k, 8)]:
+        rows.append({
+            "id": paper.get("id"),
+            "rank": paper.get("rank"),
+            "title": paper.get("title"),
+            "url": paper.get("url"),
+            "scores": scores(paper),
+            "extraction": extraction(paper),
+            "graph_metrics": graph_metrics(paper),
+            "recommendation": recommendation(paper),
+        })
+    payload = {
+        "query": briefing.get("query"),
+        "highlights": briefing.get("highlights"),
+        "research_map": briefing.get("research_map"),
+        "papers": rows,
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def answer_with_llm(question: str, briefing: dict, papers: list[dict],
+                    top_k: int, provider: str, base_url: str | None,
+                    model: str | None) -> str:
+    if provider == "none":
+        raise RuntimeError("LLM provider is disabled")
+    if provider == "deepseek":
+        api_key = os.environ.get("DEEPSEEK_API_KEY")
+        base_url = base_url or "https://api.deepseek.com/chat/completions"
+        model = model or "deepseek-chat"
+    else:
+        api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("LLM_API_KEY")
+        if not base_url:
+            raise RuntimeError("--llm-base-url is required for openai-compatible provider")
+        model = model or "gpt-4o-mini"
+    if not api_key:
+        raise RuntimeError(f"missing API key for {provider}")
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a grounded research briefing assistant. Answer only from the JSON context. "
+                "Cite arXiv IDs/ranks/URLs. If a fact is missing, say it is unavailable in cached artifacts."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"Question: {question}\n\nCached JSON context:\n{llm_context(briefing, papers, top_k)}",
+        },
+    ]
+    body = json.dumps({"model": model, "messages": messages, "temperature": 0.2}, ensure_ascii=False).encode("utf-8")
+    req = urlrequest.Request(
+        base_url,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urlrequest.urlopen(req, timeout=45) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except URLError as exc:
+        raise RuntimeError(f"LLM request failed: {exc}") from exc
+    return payload["choices"][0]["message"]["content"].strip()
 
 
 def answer_question(question: str, briefing: dict, papers: list[dict], top_k: int) -> str:
@@ -387,8 +660,33 @@ def answer_question(question: str, briefing: dict, papers: list[dict], top_k: in
             + available_identifiers(papers, top_k)
         )
 
+    if any(term in q for term in ["similar", "nearest", "neighbor", "相似", "相关论文", "类似"]):
+        return answer_similar(question, papers, top_k)
+
     if identified:
+        if any(term in q for term in ["why", "recommend", "推荐", "为什么", "理由"]):
+            rec = recommendation(identified[0])
+            return (
+                f"## Why This Paper Was Recommended\n\n"
+                f"{paper_label(identified[0])}\n\n"
+                f"- Reason: {rec.get('why_recommended', 'No generated recommendation reason is cached yet.')}\n"
+                f"- Best for: {', '.join(rec.get('best_for', []) or []) or 'unavailable'}\n"
+                f"- Evidence: {'; '.join(rec.get('evidence', []) or []) or 'unavailable'}\n"
+                f"- Caveats: {'; '.join(rec.get('caveats', []) or []) or 'none cached'}"
+            )
         return answer_detail(identified[0])
+
+    if any(term in q for term in ["reading", "read order", "plan", "route", "路线", "阅读顺序", "怎么读"]):
+        return answer_reading_plan(papers, top_k)
+
+    if any(term in q for term in ["recommend", "why read", "推荐", "值得读", "必读"]):
+        return answer_recommendations(papers, top_k)
+
+    if any(term in q for term in ["community", "cluster", "topic group", "社区", "分组", "研究方向"]):
+        return answer_communities(briefing, papers, top_k)
+
+    if any(term in q for term in ["practical", "reproduce", "reproducible", "dataset", "evaluation", "实验", "复现", "数据集"]):
+        return answer_practical(papers, top_k)
 
     if any(term in q for term in ["novel", "bridg", "central", "pagerank", "新颖", "桥接", "中心"]):
         return answer_network(question, papers, top_k)
@@ -426,6 +724,12 @@ def main() -> int:
                         help="Number of papers for list/search answers (default 5)")
     parser.add_argument("--save", action="store_true",
                         help="Append question and answer to followups.jsonl")
+    parser.add_argument("--llm-provider", choices=sorted(LLM_PROVIDERS), default="none",
+                        help="Optional grounded LLM synthesis provider (default: none)")
+    parser.add_argument("--llm-base-url", default=None,
+                        help="OpenAI-compatible chat completions URL")
+    parser.add_argument("--llm-model", default=None,
+                        help="Model name for --llm-provider")
     args = parser.parse_args()
 
     if args.top_k <= 0:
@@ -440,7 +744,24 @@ def main() -> int:
     if not papers:
         answer = "No cached papers are available in this run. Run the upstream pipeline first."
     else:
-        answer = answer_question(question, briefing, papers, args.top_k)
+        if args.llm_provider != "none":
+            try:
+                answer = answer_with_llm(
+                    question,
+                    briefing,
+                    papers,
+                    args.top_k,
+                    args.llm_provider,
+                    args.llm_base_url,
+                    args.llm_model,
+                )
+            except RuntimeError as exc:
+                answer = (
+                    f"LLM synthesis unavailable ({exc}); falling back to cached template mode.\n\n"
+                    + answer_question(question, briefing, papers, args.top_k)
+                )
+        else:
+            answer = answer_question(question, briefing, papers, args.top_k)
 
     print(answer)
 
